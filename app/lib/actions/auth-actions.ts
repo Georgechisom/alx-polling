@@ -4,15 +4,42 @@ import { createClient } from "@/lib/supabase/server";
 import { LoginFormData, RegisterFormData } from "../types";
 
 // Simple in-memory rate limiting (in production, use Redis or database)
+/**
+ * In-memory store for rate-limiting login and registration attempts.
+ *
+ * @remarks
+ * This is a simple, non-persistent solution suitable for development.
+ * For production, a more robust solution like Redis or a database-backed store
+ * is recommended to ensure persistence and scalability across multiple server instances.
+ *
+ * The key is a combination of the action (e.g., 'login') and the user's email,
+ * and the value stores the number of attempts and the timestamp of the last attempt.
+ */
 const rateLimitMap = new Map<
   string,
   { attempts: number; lastAttempt: number }
 >();
 
+/**
+ * Generates a unique key for rate-limiting based on the user's email and the action being performed.
+ *
+ * @param email - The user's email address.
+ * @param action - The action being rate-limited (e.g., 'login', 'register').
+ * @returns A unique string key for the rate-limiting map.
+ */
 function getRateLimitKey(email: string, action: string): string {
   return `${action}:${email.toLowerCase()}`;
 }
 
+/**
+ * Checks if a user is rate-limited for a specific action.
+ *
+ * @param email - The user's email address.
+ * @param action - The action to check (e.g., 'login', 'register').
+ * @param maxAttempts - The maximum number of allowed attempts within the time window. Defaults to 5.
+ * @param windowMs - The time window in milliseconds. Defaults to 15 minutes.
+ * @returns `true` if the user is rate-limited, `false` otherwise.
+ */
 function isRateLimited(
   email: string,
   action: string,
@@ -24,23 +51,31 @@ function isRateLimited(
   const record = rateLimitMap.get(key);
 
   if (!record) {
+    // No record found, so this is the first attempt.
     rateLimitMap.set(key, { attempts: 1, lastAttempt: now });
     return false;
   }
 
-  // Reset if window has passed
+  // Reset the attempt count if the time window has passed.
   if (now - record.lastAttempt > windowMs) {
     rateLimitMap.set(key, { attempts: 1, lastAttempt: now });
     return false;
   }
 
-  // Increment attempts
+  // Increment the attempt count.
   record.attempts++;
   record.lastAttempt = now;
 
+  // The user is rate-limited if they have exceeded the maximum number of attempts.
   return record.attempts > maxAttempts;
 }
 
+/**
+ * Validates an email address against a set of rules.
+ *
+ * @param email - The email address to validate.
+ * @returns A string with an error message if validation fails, or `null` if it succeeds.
+ */
 function validateEmail(email: string): string | null {
   if (!email || typeof email !== "string") {
     return "Email is required.";
@@ -55,7 +90,7 @@ function validateEmail(email: string): string | null {
     return "Email is too long.";
   }
 
-  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  const emailRegex = /^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/;
   if (!emailRegex.test(trimmedEmail)) {
     return "Please enter a valid email address.";
   }
@@ -63,6 +98,12 @@ function validateEmail(email: string): string | null {
   return null;
 }
 
+/**
+ * Validates a password against a set of security rules.
+ *
+ * @param password - The password to validate.
+ * @returns A string with an error message if validation fails, or `null` if it succeeds.
+ */
 function validatePassword(password: string): string | null {
   if (!password || typeof password !== "string") {
     return "Password is required.";
@@ -77,13 +118,19 @@ function validatePassword(password: string): string | null {
   }
 
   // Check for at least one number and one letter
-  if (!/(?=.*[a-zA-Z])(?=.*\d)/.test(password)) {
+  if (!/(?=.*[a-zA-Z])(?=.*\\d)/.test(password)) {
     return "Password must contain at least one letter and one number.";
   }
 
   return null;
 }
 
+/**
+ * Validates a user's name.
+ *
+ * @param name - The name to validate.
+ * @returns A string with an error message if validation fails, or `null` if it succeeds.
+ */
 function validateName(name: string): string | null {
   if (!name || typeof name !== "string") {
     return "Name is required.";
@@ -99,13 +146,20 @@ function validateName(name: string): string | null {
   }
 
   // Check for valid characters (letters, spaces, hyphens, apostrophes)
-  if (!/^[a-zA-Z\s'-]+$/.test(trimmedName)) {
+  if (!/^[a-zA-Z\\s'-]+$/.test(trimmedName)) {
     return "Name can only contain letters, spaces, hyphens, and apostrophes.";
   }
 
   return null;
 }
 
+/**
+ * Handles the user login flow. It validates credentials, checks for rate-limiting,
+ * and attempts to sign in the user with Supabase.
+ *
+ * @param data - An object containing the user's email and password.
+ * @returns An object with either an `error` message or `null` on success.
+ */
 export async function login(data: LoginFormData) {
   const supabase = await createClient();
 
@@ -122,7 +176,7 @@ export async function login(data: LoginFormData) {
 
   const email = data.email.trim().toLowerCase();
 
-  // Check rate limiting
+  // Security: Apply rate-limiting to prevent brute-force attacks.
   if (isRateLimited(email, "login", 5, 15 * 60 * 1000)) {
     return {
       error: "Too many login attempts. Please try again in 15 minutes.",
@@ -135,15 +189,23 @@ export async function login(data: LoginFormData) {
   });
 
   if (error) {
-    // Generic error message to prevent user enumeration
+    // Security: Return a generic error message to prevent user enumeration attacks,
+    // where an attacker could otherwise determine if an email is registered.
     return { error: "Invalid email or password." };
   }
 
-  // Success: clear rate limiting on successful login
+  // On successful login, clear any previous rate-limiting records for this user.
   rateLimitMap.delete(getRateLimitKey(email, "login"));
   return { error: null };
 }
 
+/**
+ * Handles the user registration flow. It validates user input, checks for rate-limiting,
+ * and attempts to sign up the user with Supabase.
+ *
+ * @param data - An object containing the user's name, email, and password.
+ * @returns An object with either an `error` message or `null` on success.
+ */
 export async function register(data: RegisterFormData) {
   const supabase = await createClient();
 
@@ -166,7 +228,7 @@ export async function register(data: RegisterFormData) {
   const email = data.email.trim().toLowerCase();
   const name = data.name.trim();
 
-  // Check rate limiting
+  // Security: Apply rate-limiting to prevent spam or abuse.
   if (isRateLimited(email, "register", 3, 60 * 60 * 1000)) {
     return {
       error: "Too many registration attempts. Please try again in 1 hour.",
@@ -184,18 +246,25 @@ export async function register(data: RegisterFormData) {
   });
 
   if (error) {
-    // Handle specific errors while preventing information disclosure
+    // Provide a more specific error if the user already exists,
+    // which is acceptable in a registration context.
     if (error.message.includes("already registered")) {
       return { error: "An account with this email already exists." };
     }
+    // For other errors, return a generic message.
     return { error: "Registration failed. Please try again." };
   }
 
-  // Success: clear rate limiting on successful registration
+  // On successful registration, clear any previous rate-limiting records.
   rateLimitMap.delete(getRateLimitKey(email, "register"));
   return { error: null };
 }
 
+/**
+ * Logs out the currently authenticated user.
+ *
+ * @returns An object with either an `error` message or `null` on success.
+ */
 export async function logout() {
   const supabase = await createClient();
   const { error } = await supabase.auth.signOut();
@@ -205,6 +274,12 @@ export async function logout() {
   return { error: null };
 }
 
+/**
+ * Retrieves the currently authenticated user's data.
+ *
+ * @returns The user object if authenticated, otherwise `null`.
+ *          Returns `null` on any error to ensure the caller can safely handle unauthenticated states.
+ */
 export async function getCurrentUser() {
   try {
     const supabase = await createClient();
@@ -214,10 +289,16 @@ export async function getCurrentUser() {
     }
     return data.user;
   } catch {
+    // Catch any unexpected errors during client creation or the request itself.
     return null;
   }
 }
 
+/**
+ * Retrieves the current session data for the user.
+ *
+ * @returns The session object if a valid session exists, otherwise `null`.
+ */
 export async function getSession() {
   try {
     const supabase = await createClient();
@@ -227,6 +308,7 @@ export async function getSession() {
     }
     return data.session;
   } catch {
+    // Catch any unexpected errors.
     return null;
   }
 }

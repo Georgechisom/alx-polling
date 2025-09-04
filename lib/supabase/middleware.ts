@@ -38,7 +38,7 @@ export async function updateSession(request: NextRequest) {
 
   // Get both user and session for more comprehensive checks
   const {
-    data: { user, session },
+    data: { user }, //session
     error: authError,
   } = await supabase.auth.getUser();
 

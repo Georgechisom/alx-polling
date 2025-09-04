@@ -3,11 +3,17 @@
 import { createClient } from "@/lib/supabase/server";
 import { revalidatePath } from "next/cache";
 
-// Input validation helpers
+/**
+ * Validates the input for creating or updating a poll.
+ *
+ * @param {string} question - The poll question.
+ * @param {string[]} options - An array of poll options.
+ * @returns {string[]} An array of error messages. Returns an empty array if validation passes.
+ */
 function validatePollInput(question: string, options: string[]) {
   const errors: string[] = [];
 
-  // Validate question
+  // Validate the poll question.
   if (!question || typeof question !== "string") {
     errors.push("Question is required.");
   } else {
@@ -19,12 +25,13 @@ function validatePollInput(question: string, options: string[]) {
     }
   }
 
-  // Validate options
+  // Validate the poll options.
   if (!Array.isArray(options) || options.length < 2) {
     errors.push("At least two options are required.");
   } else if (options.length > 10) {
     errors.push("Maximum of 10 options allowed.");
   } else {
+    // Ensure there are at least two non-empty options.
     const validOptions = options.filter(
       (opt) => typeof opt === "string" && opt.trim().length > 0
     );
@@ -32,7 +39,7 @@ function validatePollInput(question: string, options: string[]) {
       errors.push("At least two non-empty options are required.");
     }
 
-    // Check option length
+    // Check for the length of each option.
     const tooLongOptions = validOptions.filter(
       (opt) => opt.trim().length > 200
     );
@@ -44,28 +51,42 @@ function validatePollInput(question: string, options: string[]) {
   return errors;
 }
 
+/**
+ * Sanitizes a string by trimming whitespace and removing HTML tags.
+ * This is a basic security measure to prevent XSS attacks.
+ *
+ * @param {string} str - The string to sanitize.
+ * @returns {string} The sanitized string.
+ */
 function sanitizeString(str: string): string {
+  // A simple sanitizer. For more robust needs, a library like DOMPurify would be better.
   return str.trim().replace(/[<>]/g, "");
 }
 
-// CREATE POLL
+/**
+ * Creates a new poll in the database.
+ * This is a Next.js Server Action.
+ *
+ * @param {FormData} formData - The form data from the poll creation form.
+ * @returns {Promise<{ error: string | null }>} An object with an error message or null on success.
+ */
 export async function createPoll(formData: FormData) {
   const supabase = await createClient();
 
   const question = formData.get("question") as string;
   const options = formData.getAll("options").filter(Boolean) as string[];
 
-  // Validate input
+  // Server-side validation of the poll data.
   const validationErrors = validatePollInput(question, options);
   if (validationErrors.length > 0) {
     return { error: validationErrors.join(" ") };
   }
 
-  // Sanitize input
+  // Sanitize inputs to prevent XSS.
   const sanitizedQuestion = sanitizeString(question);
   const sanitizedOptions = options.map((opt) => sanitizeString(opt));
 
-  // Get user from session
+  // Get the current user from the session to associate the poll with them.
   const {
     data: { user },
     error: userError,
@@ -74,6 +95,7 @@ export async function createPoll(formData: FormData) {
     return { error: userError.message };
   }
   if (!user) {
+    // Security: Ensure only authenticated users can create polls.
     return { error: "You must be logged in to create a poll." };
   }
 
@@ -89,11 +111,17 @@ export async function createPoll(formData: FormData) {
     return { error: error.message };
   }
 
+  // Revalidate the '/polls' path to ensure the new poll appears immediately
+  // on the user's dashboard without requiring a manual refresh.
   revalidatePath("/polls");
   return { error: null };
 }
 
-// GET USER POLLS
+/**
+ * Fetches all polls created by the currently authenticated user.
+ *
+ * @returns {Promise<{ polls: any[], error: string | null }>} An object containing the user's polls and an error message if any.
+ */
 export async function getUserPolls() {
   const supabase = await createClient();
   const {
@@ -111,11 +139,17 @@ export async function getUserPolls() {
   return { polls: data ?? [], error: null };
 }
 
-// GET POLL BY ID - Public access for voting, but with sanitized errors
+/**
+ * Fetches a single poll by its ID. This function is for public access.
+ * It returns a generic error for not found polls to avoid leaking information.
+ *
+ * @param {string} id - The UUID of the poll to fetch.
+ * @returns {Promise<{ poll: any | null, error: string | null }>} The poll data or an error.
+ */
 export async function getPollById(id: string) {
   const supabase = await createClient();
 
-  // Validate ID format
+  // Basic validation of the poll ID format.
   if (!id || typeof id !== "string" || id.trim().length === 0) {
     return { poll: null, error: "Invalid poll ID." };
   }
@@ -127,16 +161,22 @@ export async function getPollById(id: string) {
     .single();
 
   if (error) {
+    // Return a generic error to prevent attackers from guessing valid poll IDs.
     return { poll: null, error: "Poll not found." };
   }
   return { poll: data, error: null };
 }
 
-// GET POLL BY ID WITH OWNERSHIP CHECK - For editing/admin operations
+/**
+ * Fetches a poll by its ID and verifies that the current user is the owner.
+ * This is a protected action used for editing or deleting polls.
+ *
+ * @param {string} id - The UUID of the poll to fetch.
+ * @returns {Promise<{ poll: any | null, error: string | null }>} The poll data if ownership is verified, otherwise an error.
+ */
 export async function getPollByIdWithOwnership(id: string) {
   const supabase = await createClient();
 
-  // Get user from session
   const {
     data: { user },
     error: userError,
@@ -146,7 +186,7 @@ export async function getPollByIdWithOwnership(id: string) {
     return { poll: null, error: "Authentication required." };
   }
 
-  // Validate ID format
+  // Validate ID format to prevent invalid queries.
   if (!id || typeof id !== "string" || id.trim().length === 0) {
     return { poll: null, error: "Invalid poll ID." };
   }
@@ -155,6 +195,7 @@ export async function getPollByIdWithOwnership(id: string) {
     .from("polls")
     .select("*")
     .eq("id", id.trim())
+    // Security check: Crucially, this query filters by both poll ID and the authenticated user's ID.
     .eq("user_id", user.id)
     .single();
 
@@ -164,11 +205,18 @@ export async function getPollByIdWithOwnership(id: string) {
   return { poll: data, error: null };
 }
 
-// SUBMIT VOTE
+/**
+ * Submits a vote for a specific poll option.
+ * This is a Next.js Server Action.
+ *
+ * @param {string} pollId - The ID of the poll being voted on.
+ * @param {number} optionIndex - The index of the selected option.
+ * @returns {Promise<{ error: string | null }>} An object with an error message or null on success.
+ */
 export async function submitVote(pollId: string, optionIndex: number) {
   const supabase = await createClient();
 
-  // Validate inputs
+  // Validate the inputs to ensure they are in the correct format.
   if (!pollId || typeof pollId !== "string" || pollId.trim().length === 0) {
     return { error: "Invalid poll ID." };
   }
@@ -181,12 +229,13 @@ export async function submitVote(pollId: string, optionIndex: number) {
     return { error: "Invalid option selected." };
   }
 
-  // Verify poll exists and get its options to validate optionIndex
+  // First, verify the poll exists to provide a clear error message.
   const { poll, error: pollError } = await getPollById(pollId.trim());
   if (pollError || !poll) {
     return { error: "Poll not found." };
   }
 
+  // Security check: Ensure the provided option index is within the valid range for the poll.
   if (optionIndex >= poll.options.length) {
     return { error: "Invalid option selected." };
   }
@@ -195,7 +244,8 @@ export async function submitVote(pollId: string, optionIndex: number) {
     data: { user },
   } = await supabase.auth.getUser();
 
-  // Check if user already voted (prevent double voting)
+  // Security: Prevent double voting by checking if the user has already voted.
+  // This check is only applied to authenticated users. Anonymous voting is allowed but can be repeated.
   if (user) {
     const { data: existingVote } = await supabase
       .from("votes")
@@ -212,7 +262,7 @@ export async function submitVote(pollId: string, optionIndex: number) {
   const { error } = await supabase.from("votes").insert([
     {
       poll_id: pollId.trim(),
-      user_id: user?.id ?? null,
+      user_id: user?.id ?? null, // Associate vote with user if logged in, otherwise anonymous.
       option_index: optionIndex,
     },
   ]);
@@ -223,11 +273,16 @@ export async function submitVote(pollId: string, optionIndex: number) {
   return { error: null };
 }
 
-// DELETE POLL
+/**
+ * Deletes a poll owned by the current user.
+ * This is a Next.js Server Action.
+ *
+ * @param {string} id - The ID of the poll to delete.
+ * @returns {Promise<{ error: string | null }>} An object with an error message or null on success.
+ */
 export async function deletePoll(id: string) {
   const supabase = await createClient();
 
-  // Get user from session
   const {
     data: { user },
     error: userError,
@@ -237,7 +292,8 @@ export async function deletePoll(id: string) {
     return { error: "Authentication required to delete polls." };
   }
 
-  // Only allow deleting polls owned by the user
+  // Security: The `delete` operation is scoped to the `user_id` to ensure
+  // users can only delete their own polls. This is a critical row-level security check.
   const { error } = await supabase
     .from("polls")
     .delete()
@@ -254,11 +310,17 @@ export async function deletePoll(id: string) {
   return { error: null };
 }
 
-// UPDATE POLL
+/**
+ * Updates an existing poll owned by the current user.
+ * This is a Next.js Server Action.
+ *
+ * @param {string} pollId - The ID of the poll to update.
+ * @param {FormData} formData - The new poll data from the edit form.
+ * @returns {Promise<{ error: string | null }>} An object with an error message or null on success.
+ */
 export async function updatePoll(pollId: string, formData: FormData) {
   const supabase = await createClient();
 
-  // Validate pollId
   if (!pollId || typeof pollId !== "string" || pollId.trim().length === 0) {
     return { error: "Invalid poll ID." };
   }
@@ -266,17 +328,15 @@ export async function updatePoll(pollId: string, formData: FormData) {
   const question = formData.get("question") as string;
   const options = formData.getAll("options").filter(Boolean) as string[];
 
-  // Validate input
   const validationErrors = validatePollInput(question, options);
   if (validationErrors.length > 0) {
     return { error: validationErrors.join(" ") };
   }
 
-  // Sanitize input
   const sanitizedQuestion = sanitizeString(question);
   const sanitizedOptions = options.map((opt) => sanitizeString(opt));
 
-  // Get user from session
+  // Verify user authentication.
   const {
     data: { user },
     error: userError,
@@ -285,7 +345,8 @@ export async function updatePoll(pollId: string, formData: FormData) {
     return { error: "Authentication required to update polls." };
   }
 
-  // Only allow updating polls owned by the user
+  // Security: The `update` operation is scoped with `.eq("user_id", user.id)`
+  // to ensure that users can only modify polls they own.
   const { error } = await supabase
     .from("polls")
     .update({ question: sanitizedQuestion, options: sanitizedOptions })
@@ -300,4 +361,49 @@ export async function updatePoll(pollId: string, formData: FormData) {
 
   revalidatePath("/polls");
   return { error: null };
+}
+
+/**
+ * Gets vote counts for each option in a poll.
+ * This is used for displaying poll results.
+ *
+ * @param {string} pollId - The ID of the poll to get vote counts for.
+ * @returns {Promise<{ voteCounts: number[], error: string | null }>} Vote counts array or error.
+ */
+export async function getVoteCounts(pollId: string) {
+  const supabase = await createClient();
+
+  // Validate pollId
+  if (!pollId || typeof pollId !== "string" || pollId.trim().length === 0) {
+    return { voteCounts: [], error: "Invalid poll ID." };
+  }
+
+  try {
+    const { data: votes, error } = await supabase
+      .from("votes")
+      .select("option_index")
+      .eq("poll_id", pollId.trim());
+
+    if (error) {
+      return { voteCounts: [], error: "Failed to load vote data." };
+    }
+
+    // Get the poll to know how many options it has
+    const { poll } = await getPollById(pollId.trim());
+    if (!poll) {
+      return { voteCounts: [], error: "Poll not found." };
+    }
+
+    // Count votes for each option
+    const voteCounts = new Array(poll.options.length).fill(0);
+    votes?.forEach((vote) => {
+      if (vote.option_index >= 0 && vote.option_index < poll.options.length) {
+        voteCounts[vote.option_index]++;
+      }
+    });
+
+    return { voteCounts, error: null };
+  } catch {
+    return { voteCounts: [], error: "Failed to load vote data." };
+  }
 }
